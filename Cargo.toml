@@ -1,0 +1,21 @@
+[package]
+name = "gaem"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
+ash-window = "0.13.0"
+winit = {version="0.30.9", default-features=false, features=[
+    "ahash",
+    "bytemuck",
+    "memmap2",
+    "percent-encoding",
+    "rwh_06",
+    "sctk",
+    "sctk-adwaita",
+    "wayland",
+    "wayland-backend",
+    "wayland-client",
+    "wayland-protocols",
+]}

@@ -1,11 +1,12 @@
 [package]
 name = "gaem"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 ash = { version = "0.38.0", default-features = false, features = ["linked", "debug", "std"] }
 ash-window = "0.13.0"
+bytemuck = "1.22.0"
 winit = {version="0.30.9", default-features=false, features=[
     "ahash",
     "bytemuck",

@@ -1,8 +1,8 @@
 {
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url  = "github:numtide/flake-utils";
+    rust-overlay.url = "github:oxalica/rust-overlay?ref=snapshot/2025-01-11";
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils, ... }:
@@ -12,26 +12,31 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        rustpkg = pkgs.rust-bin.nightly."2024-11-22".default.override {
-          extensions = [ "rust-src" "rust-analyzer" "rustfmt" "llvm-tools"];
-          targets = [ "x86_64-unknown-linux-gnu" ];
-        };
-      in {
-        RUST_BACKTRACE = 1;
-        devShells.default = with pkgs; mkShell rec {
+        rustpkg-old = pkgs.rust-bin.fromRustupToolchainFile ./shaders/rust-toolchain.toml;
+        # this is nightly 2025-01-01
+        rustpkg = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+          extensions = [ "rust-src" "rust-analyzer" "rustfmt" "rustc-dev" "llvm-tools-preview" ];
+          targets = [ "arm-unknown-linux-gnueabihf" ];
+        });
+        rustDevShell = rust: with pkgs; mkShell rec {
           nativeBuildInputs = [
             pkg-config
-            rustpkg
-            shaderc
             wayland
             libxkbcommon
             vulkan-headers
             vulkan-tools
             vulkan-loader
             vulkan-validation-layers
+            spirv-tools
+            rust
           ];
           LD_LIBRARY_PATH = "${lib.makeLibraryPath nativeBuildInputs}";
         };
+      in {
+        RUST_BACKTRACE = 1;
+        CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=1;
+        devShells.cpu = rustDevShell rustpkg;
+        devShells.shader = rustDevShell rustpkg-old;
       }
     );
 }

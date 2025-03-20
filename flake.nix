@@ -28,6 +28,8 @@
             vulkan-loader
             vulkan-validation-layers
             spirv-tools
+            renderdoc
+            xorg.libX11
             rust
           ];
           LD_LIBRARY_PATH = "${lib.makeLibraryPath nativeBuildInputs}";

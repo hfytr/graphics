@@ -4,23 +4,16 @@ use spirv_std::{
     spirv,
 };
 
-const POSITIONS: [Vec2; 3] = [vec2(0.0, -0.5), vec2(0.5, 0.5), vec2(-0.5, 0.5)];
-
-const COLORS: [Vec3; 3] = [
-    vec3(1.0, 0.0, 0.0),
-    vec3(0.0, 1.0, 0.0),
-    vec3(0.0, 0.0, 1.0),
-];
-
 #[allow(dead_code)]
 #[spirv(vertex)]
 pub fn vert_main(
-    #[spirv(vertex_index)] vert_ind: usize,
+    in_pos: Vec2,
+    in_col: Vec3,
     #[spirv(position)] position: &mut Vec4,
     out: &mut Vec3,
 ) {
-    *position = POSITIONS[vert_ind].extend(0.0).extend(1.0);
-    *out = COLORS[vert_ind];
+    *position = in_pos.extend(0.0).extend(1.0);
+    *out = in_col;
 }
 
 #[allow(dead_code)]

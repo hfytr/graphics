@@ -4,10 +4,12 @@ use ash::{
     util::read_spv,
     vk, Device, Entry, Instance,
 };
+use glam::{vec2, vec3, Vec2, Vec3};
 use std::io::Cursor;
 use std::{ffi::CStr, os::raw::c_char};
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::WindowEvent,
     event_loop::ActiveEventLoop,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
@@ -15,6 +17,57 @@ use winit::{
 };
 
 const MAX_IN_FLIGHT: usize = 2;
+
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct Vertex {
+    pos: Vec2,
+    col: Vec3,
+}
+
+impl Vertex {
+    pub fn binding_descr() -> Vec<vk::VertexInputBindingDescription> {
+        vec![vk::VertexInputBindingDescription::default()
+            .stride(size_of::<Vertex>() as u32)
+            .binding(0)
+            .input_rate(vk::VertexInputRate::VERTEX)]
+    }
+
+    pub fn attr_descr() -> Vec<vk::VertexInputAttributeDescription> {
+        vec![
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(0)
+                .format(vk::Format::R32G32_SFLOAT)
+                .offset(core::mem::offset_of!(Vertex, pos) as u32),
+            vk::VertexInputAttributeDescription::default()
+                .binding(0)
+                .location(1)
+                .format(vk::Format::R32G32B32_SFLOAT)
+                .offset(core::mem::offset_of!(Vertex, col) as u32),
+        ]
+    }
+}
+
+const VERTICES: [Vertex; 4] = [
+    Vertex {
+        pos: vec2(-0.5, -0.5),
+        col: vec3(1.0, 0.0, 0.0),
+    },
+    Vertex {
+        pos: vec2(0.5, -0.5),
+        col: vec3(0.0, 1.0, 0.0),
+    },
+    Vertex {
+        pos: vec2(0.5, 0.5),
+        col: vec3(0.0, 0.0, 1.0),
+    },
+    Vertex {
+        pos: vec2(-0.5, 0.5),
+        col: vec3(1.0, 1.0, 1.0),
+    },
+];
+const INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
 struct App {
     entry: Entry,
@@ -41,6 +94,9 @@ struct App {
     render_done: [vk::Semaphore; MAX_IN_FLIGHT],
     in_flight: [vk::Fence; MAX_IN_FLIGHT],
     cur_frame: usize,
+    resized: Option<PhysicalSize<u32>>,
+    vert_buff: (vk::Buffer, vk::DeviceMemory),
+    ind_buff: (vk::Buffer, vk::DeviceMemory),
 }
 pub struct WrappedApp(Option<App>);
 impl WrappedApp {
@@ -50,38 +106,38 @@ impl WrappedApp {
 }
 
 impl App {
-    fn render(&mut self) {
+    unsafe fn render(&mut self) {
         let img_idx;
-        unsafe {
-            self.device
-                .wait_for_fences(&[self.in_flight[self.cur_frame]], true, u64::MAX)
-                .expect("Failed to wait for fences.");
-            self.device
-                .reset_fences(&[self.in_flight[self.cur_frame]])
-                .expect("Failed to reset fences.");
-            match self.swap_device.acquire_next_image(
-                self.swapchain,
-                u64::MAX,
-                self.image_available[self.cur_frame],
-                vk::Fence::null(),
-            ) {
-                Ok((idx, _)) => img_idx = idx,
-                Err(e) => {
-                    if e == vk::Result::ERROR_OUT_OF_DATE_KHR || e == vk::Result::SUBOPTIMAL_KHR {
-                        println!("Recreating swap chain.");
-                        return;
-                    } else {
-                        panic!("Failed to acquire next image {}", e);
-                    }
+        self.device
+            .wait_for_fences(&[self.in_flight[self.cur_frame]], true, u64::MAX)
+            .expect("Failed to wait for fences.");
+        match self.swap_device.acquire_next_image(
+            self.swapchain,
+            u64::MAX,
+            self.image_available[self.cur_frame],
+            vk::Fence::null(),
+        ) {
+            Ok((idx, _)) => img_idx = idx,
+            Err(e) => {
+                if e == vk::Result::ERROR_OUT_OF_DATE_KHR {
+                    self.device.device_wait_idle().unwrap();
+                    self.clean_swapchain();
+                    self.create_swapchain();
+                    return;
+                } else {
+                    panic!("Failed to acquire next image.");
                 }
             }
-            self.device
-                .begin_command_buffer(
-                    self.command_buffers[self.cur_frame],
-                    &vk::CommandBufferBeginInfo::default(),
-                )
-                .expect("Failed to begin command buffer.")
         }
+        self.device
+            .reset_fences(&[self.in_flight[self.cur_frame]])
+            .expect("Failed to reset fences.");
+        self.device
+            .begin_command_buffer(
+                self.command_buffers[self.cur_frame],
+                &vk::CommandBufferBeginInfo::default(),
+            )
+            .expect("Failed to begin command buffer.");
 
         let mut clear_color = [vk::ClearValue::default()];
         clear_color[0].color.float32 = [0.0, 0.0, 0.0, 1.0];
@@ -90,48 +146,64 @@ impl App {
             .framebuffer(self.swap_framebuffers[img_idx as usize])
             .render_area(vk::Rect2D::default().extent(self.extent))
             .clear_values(&clear_color);
-        unsafe {
-            self.device
-                .reset_command_buffer(
-                    self.command_buffers[self.cur_frame],
-                    vk::CommandBufferResetFlags::empty(),
-                )
-                .expect("Failed to reset command buffer.");
-            self.device
-                .begin_command_buffer(
-                    self.command_buffers[self.cur_frame],
-                    &vk::CommandBufferBeginInfo::default(),
-                )
-                .expect("Failed to begin command buffer.");
-            self.device.cmd_begin_render_pass(
+        self.device
+            .reset_command_buffer(
                 self.command_buffers[self.cur_frame],
-                &pass_info,
-                vk::SubpassContents::INLINE,
-            );
-            self.device.cmd_bind_pipeline(
+                vk::CommandBufferResetFlags::empty(),
+            )
+            .expect("Failed to reset command buffer.");
+        self.device
+            .begin_command_buffer(
                 self.command_buffers[self.cur_frame],
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
-        }
+                &vk::CommandBufferBeginInfo::default(),
+            )
+            .expect("Failed to begin command buffer.");
+        self.device.cmd_begin_render_pass(
+            self.command_buffers[self.cur_frame],
+            &pass_info,
+            vk::SubpassContents::INLINE,
+        );
+        self.device.cmd_bind_pipeline(
+            self.command_buffers[self.cur_frame],
+            vk::PipelineBindPoint::GRAPHICS,
+            self.pipeline,
+        );
         let viewport = [vk::Viewport::default()
             .width(self.extent.width as f32)
             .height(self.extent.height as f32)
             .max_depth(1.0)];
         let scissor = [vk::Rect2D::default().extent(self.extent)];
-        unsafe {
-            self.device
-                .cmd_set_viewport(self.command_buffers[self.cur_frame], 0, &viewport);
-            self.device
-                .cmd_set_scissor(self.command_buffers[self.cur_frame], 0, &scissor);
-            self.device
-                .cmd_draw(self.command_buffers[self.cur_frame], 3, 1, 0, 0);
-            self.device
-                .cmd_end_render_pass(self.command_buffers[self.cur_frame]);
-            self.device
-                .end_command_buffer(self.command_buffers[self.cur_frame])
-                .expect("Failed to end command buffer.");
-        }
+        self.device
+            .cmd_set_viewport(self.command_buffers[self.cur_frame], 0, &viewport);
+        self.device
+            .cmd_set_scissor(self.command_buffers[self.cur_frame], 0, &scissor);
+        let vert_buffs = [self.vert_buff.0];
+        let offsets = [0];
+        self.device.cmd_bind_vertex_buffers(
+            self.command_buffers[self.cur_frame],
+            0,
+            &vert_buffs,
+            &offsets,
+        );
+        self.device.cmd_bind_index_buffer(
+            self.command_buffers[self.cur_frame],
+            self.ind_buff.0,
+            0,
+            vk::IndexType::UINT16,
+        );
+        self.device.cmd_draw_indexed(
+            self.command_buffers[self.cur_frame],
+            INDICES.len() as u32,
+            1,
+            0,
+            0,
+            0,
+        );
+        self.device
+            .cmd_end_render_pass(self.command_buffers[self.cur_frame]);
+        self.device
+            .end_command_buffer(self.command_buffers[self.cur_frame])
+            .expect("Failed to end command buffer.");
 
         let image_available = [self.image_available[self.cur_frame]];
         let render_done = [self.render_done[self.cur_frame]];
@@ -140,26 +212,36 @@ impl App {
             .signal_semaphores(&render_done)
             .wait_dst_stage_mask(&[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT])
             .command_buffers(&self.command_buffers[self.cur_frame..=self.cur_frame]);
-        unsafe {
-            self.device
-                .queue_submit(self.queue, &[submit_info], self.in_flight[self.cur_frame])
-                .expect("Faild to submit frame.")
-        }
+        self.device
+            .queue_submit(self.queue, &[submit_info], self.in_flight[self.cur_frame])
+            .expect("Faild to submit frame.");
         let swapchains = [self.swapchain];
         let img_idxs = [img_idx];
         let present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&render_done)
             .swapchains(&swapchains)
             .image_indices(&img_idxs);
-        unsafe {
-            self.swap_device
-                .queue_present(self.queue, &present_info)
-                .expect("Failed to present.");
+        let res = self.swap_device.queue_present(self.queue, &present_info);
+        if res.is_err() || self.resized.is_some() {
+            if self.resized.is_some() || res.unwrap_err() == vk::Result::ERROR_OUT_OF_DATE_KHR {
+                if let Some(PhysicalSize { width, height }) = self.resized {
+                    if width == 0 || height == 0 {
+                        return;
+                    }
+                    self.resized = None;
+                }
+                self.device.device_wait_idle().unwrap();
+                self.clean_swapchain();
+                self.create_swapchain();
+                return;
+            } else {
+                panic!("Failed to acquire next image.");
+            }
         }
         self.cur_frame = (self.cur_frame + 1) % MAX_IN_FLIGHT;
     }
 
-    fn create_swapchain(&mut self) {
+    unsafe fn create_swapchain(&mut self) {
         let (capabilities, formats, modes) =
             App::get_swap_support(self.pdevice, &self.surface_loader, self.surface);
         self.format = *formats
@@ -174,7 +256,7 @@ impl App {
         } else {
             capabilities.current_extent
         };
-        self.swapchain = unsafe {
+        self.swapchain = {
             let mode = *modes
                 .iter()
                 .find(|m| **m == vk::PresentModeKHR::MAILBOX)
@@ -205,7 +287,7 @@ impl App {
                 .create_swapchain(&info, None)
                 .expect("Failed to create swapchain.")
         };
-        self.swap_imgs = unsafe {
+        self.swap_imgs = {
             self.swap_device
                 .get_swapchain_images(self.swapchain)
                 .expect("Failed to retrieve swapchain image handles.")
@@ -240,7 +322,7 @@ impl App {
                 }
             })
             .collect();
-        self.render_pass = unsafe {
+        self.render_pass = {
             let attachment_desc = [vk::AttachmentDescription::default()
                 .format(self.format.format)
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -286,20 +368,50 @@ impl App {
             .collect();
     }
 
-    fn clean_swapchain(&mut self) {
-        unsafe {
-            for i in 0..self.swap_framebuffers.len() {
-                self.device
-                    .destroy_framebuffer(self.swap_framebuffers[i], None);
-            }
-            for i in 0..self.swap_img_views.len() {
-                self.device.destroy_image_view(self.swap_img_views[i], None);
-            }
-            self.swap_device.destroy_swapchain(self.swapchain, None);
+    unsafe fn clean_swapchain(&mut self) {
+        for i in 0..self.swap_framebuffers.len() {
+            self.device
+                .destroy_framebuffer(self.swap_framebuffers[i], None);
         }
+        for i in 0..self.swap_img_views.len() {
+            self.device.destroy_image_view(self.swap_img_views[i], None);
+        }
+        self.swap_device.destroy_swapchain(self.swapchain, None);
+        self.device.destroy_render_pass(self.render_pass, None);
     }
 
-    fn get_swap_support(
+    unsafe fn copy_buff(&self, size: u64, src: vk::Buffer, dst: vk::Buffer) {
+        let create_info = vk::CommandBufferAllocateInfo::default()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1)
+            .command_pool(self.command_pool);
+        let command_buff = self
+            .device
+            .allocate_command_buffers(&create_info)
+            .expect("Faileed to allocate command buffers while copying staging -> vertex.");
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        self.device
+            .begin_command_buffer(command_buff[0], &begin_info)
+            .expect("Failed to begin command buffer.");
+        let copy_reg = [vk::BufferCopy::default().size(size)];
+        self.device
+            .cmd_copy_buffer(command_buff[0], src, dst, &copy_reg);
+        self.device
+            .end_command_buffer(command_buff[0])
+            .expect("Failed to end command buffer.");
+        let submit_info = [vk::SubmitInfo::default().command_buffers(&command_buff)];
+        self.device
+            .queue_submit(self.queue, &submit_info, vk::Fence::null())
+            .expect("Failed to submit to queue.");
+        self.device
+            .queue_wait_idle(self.queue)
+            .expect("Failed to wait idle.");
+        self.device
+            .free_command_buffers(self.command_pool, &command_buff);
+    }
+
+    unsafe fn get_swap_support(
         pdevice: vk::PhysicalDevice,
         surface_loader: &surface::Instance,
         surface: vk::SurfaceKHR,
@@ -308,19 +420,17 @@ impl App {
         Vec<vk::SurfaceFormatKHR>,
         Vec<vk::PresentModeKHR>,
     ) {
-        unsafe {
-            (
-                surface_loader
-                    .get_physical_device_surface_capabilities(pdevice, surface)
-                    .expect("Failed to get device surface capabilities."),
-                surface_loader
-                    .get_physical_device_surface_formats(pdevice, surface)
-                    .expect("Failed to get device surface formats."),
-                surface_loader
-                    .get_physical_device_surface_present_modes(pdevice, surface)
-                    .expect("Failed to get device surface modes."),
-            )
-        }
+        (
+            surface_loader
+                .get_physical_device_surface_capabilities(pdevice, surface)
+                .expect("Failed to get device surface capabilities."),
+            surface_loader
+                .get_physical_device_surface_formats(pdevice, surface)
+                .expect("Failed to get device surface formats."),
+            surface_loader
+                .get_physical_device_surface_present_modes(pdevice, surface)
+                .expect("Failed to get device surface modes."),
+        )
     }
 
     fn basic(
@@ -356,6 +466,9 @@ impl App {
             render_done: [vk::Semaphore::default(); MAX_IN_FLIGHT],
             in_flight: [vk::Fence::default(); MAX_IN_FLIGHT],
             cur_frame: 0,
+            resized: None,
+            vert_buff: (vk::Buffer::default(), vk::DeviceMemory::default()),
+            ind_buff: (vk::Buffer::default(), vk::DeviceMemory::default()),
         }
     }
 }
@@ -388,6 +501,7 @@ impl ApplicationHandler for WrappedApp {
             .expect("Failed to enumerate required extensions.")
             .to_vec();
             extension_names.push(debug_utils::NAME.as_ptr());
+            dbg!(&extension_names);
             let instance_info = vk::InstanceCreateInfo::default()
                 .application_info(&app_info)
                 .enabled_layer_names(&layer_names_raw)
@@ -465,10 +579,13 @@ impl ApplicationHandler for WrappedApp {
         let mut app = App::basic(entry, instance, window, device, surface_loader, swap_device);
         app.pdevice = pdevice;
         app.surface = surface;
-        app.create_swapchain();
-
+        // queue / swapchain
         unsafe {
+            app.create_swapchain();
             app.queue = app.device.get_device_queue(queue_ind, 0);
+        }
+        // pipeline
+        unsafe {
             let shader_code = read_spv(&mut Cursor::new(&include_bytes!("../../shaders/target/spirv-builder/spirv-unknown-spv1.0/release/deps/shader_crate.spv")[..])).expect("Failed to read shader spv.");
             let info = vk::ShaderModuleCreateInfo::default().code(&shader_code);
             let shader_module = app
@@ -485,9 +602,11 @@ impl ApplicationHandler for WrappedApp {
                 shader_stage(c"vert_main", vk::ShaderStageFlags::VERTEX),
                 shader_stage(c"frag_main", vk::ShaderStageFlags::FRAGMENT),
             ];
+            let binding_descrs = Vertex::binding_descr();
+            let attr_descrs = Vertex::attr_descr();
             let vert_in_info = vk::PipelineVertexInputStateCreateInfo::default()
-                .vertex_binding_descriptions(&[])
-                .vertex_attribute_descriptions(&[]);
+                .vertex_binding_descriptions(&binding_descrs)
+                .vertex_attribute_descriptions(&attr_descrs);
             let dyn_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
             let dyn_state_info =
                 vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);
@@ -541,7 +660,9 @@ impl ApplicationHandler for WrappedApp {
                 .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
                 .expect("Failed to create graphics pipeline.")[0];
             app.device.destroy_shader_module(shader_module, None);
-
+        }
+        // command pool
+        unsafe {
             let pool_info = vk::CommandPoolCreateInfo::default()
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
                 .queue_family_index(queue_ind);
@@ -549,6 +670,9 @@ impl ApplicationHandler for WrappedApp {
                 .device
                 .create_command_pool(&pool_info, None)
                 .expect("Failed to create command pool.");
+        }
+        // command buffers
+        unsafe {
             let buff_info = vk::CommandBufferAllocateInfo::default()
                 .command_pool(app.command_pool)
                 .level(vk::CommandBufferLevel::PRIMARY)
@@ -559,7 +683,9 @@ impl ApplicationHandler for WrappedApp {
                     .allocate_command_buffers(&buff_info)
                     .expect("Failed to allocate command buffers")[0]
             }
-
+        }
+        // semaphores / fences
+        unsafe {
             let fence_create_info =
                 vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
             for i in 0..MAX_IN_FLIGHT {
@@ -576,8 +702,84 @@ impl ApplicationHandler for WrappedApp {
                     .create_fence(&fence_create_info, None)
                     .expect("Failed to create fence.");
             }
+        }
+        let make_buffer = |size, props, usage| unsafe {
+            let buff_info = vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let buff = app
+                .device
+                .create_buffer(&buff_info, None)
+                .expect("Failed to create vertex buffer.");
+            let mem_reqs = app.device.get_buffer_memory_requirements(buff);
+            let mem_props = app
+                .instance
+                .get_physical_device_memory_properties(app.pdevice);
+            let mem_type = mem_props
+                .memory_types
+                .iter()
+                .enumerate()
+                .find(|(i, mt)| {
+                    (mem_reqs.memory_type_bits & (1 << i)) > 0
+                        && (mt.property_flags & props) == props
+                })
+                .expect("Failed to find suitable memory type.");
+            let alloc_info = vk::MemoryAllocateInfo::default()
+                .memory_type_index(mem_type.0 as u32)
+                .allocation_size(mem_reqs.size);
+            let memory = app
+                .device
+                .allocate_memory(&alloc_info, None)
+                .expect("Failed to allocate vertex buffer.");
+            app.device
+                .bind_buffer_memory(buff, memory, 0)
+                .expect("Failed to bind memory.");
+            (buff, memory)
         };
+        // buffers
+        unsafe {
+            let buff_size = (size_of::<Vertex>() * VERTICES.len()) as u64;
+            use vk::{BufferUsageFlags as buf, MemoryPropertyFlags as mpf};
+            let staging = make_buffer(
+                buff_size,
+                mpf::HOST_VISIBLE | mpf::HOST_COHERENT,
+                buf::TRANSFER_SRC,
+            );
+            let buff = app
+                .device
+                .map_memory(staging.1, 0, buff_size, vk::MemoryMapFlags::empty())
+                .expect("Failed to map vertex buff memory") as *mut Vertex;
+            std::slice::from_raw_parts_mut(buff, VERTICES.len()).copy_from_slice(&VERTICES);
+            app.vert_buff = make_buffer(
+                buff_size,
+                mpf::DEVICE_LOCAL,
+                buf::TRANSFER_DST | buf::VERTEX_BUFFER,
+            );
+            app.copy_buff(buff_size, staging.0, app.vert_buff.0);
+            app.device.destroy_buffer(staging.0, None);
+            app.device.free_memory(staging.1, None);
 
+            let buff_size = (size_of::<u16>() * INDICES.len()) as u64;
+            let staging = make_buffer(
+                buff_size,
+                mpf::HOST_VISIBLE | mpf::HOST_COHERENT,
+                buf::TRANSFER_SRC,
+            );
+            let buff = app
+                .device
+                .map_memory(staging.1, 0, buff_size, vk::MemoryMapFlags::empty())
+                .expect("Failed to map vertex buff memory") as *mut u16;
+            std::slice::from_raw_parts_mut(buff, INDICES.len()).copy_from_slice(&INDICES);
+            app.ind_buff = make_buffer(
+                buff_size,
+                mpf::DEVICE_LOCAL,
+                buf::TRANSFER_DST | buf::INDEX_BUFFER,
+            );
+            app.copy_buff(buff_size, staging.0, app.ind_buff.0);
+            app.device.destroy_buffer(staging.0, None);
+            app.device.free_memory(staging.1, None);
+        }
         *self = WrappedApp(Some(app));
     }
 
@@ -593,7 +795,8 @@ impl ApplicationHandler for WrappedApp {
                     unsafe { app.device.device_wait_idle().unwrap() };
                     event_loop.exit()
                 }
-                WindowEvent::RedrawRequested => app.render(),
+                WindowEvent::RedrawRequested => unsafe { app.render() },
+                WindowEvent::Resized(size) => app.resized = Some(size),
                 _ => println!("Unhandled event {:?}", event),
             }
         } else {
@@ -611,11 +814,14 @@ impl Drop for App {
                 self.device.destroy_fence(self.in_flight[i], None);
             }
             self.clean_swapchain();
-            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-            self.device.destroy_render_pass(self.render_pass, None);
+            self.device.destroy_buffer(self.vert_buff.0, None);
+            self.device.free_memory(self.vert_buff.1, None);
+            self.device.destroy_buffer(self.ind_buff.0, None);
+            self.device.free_memory(self.ind_buff.1, None);
+            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
